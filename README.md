@@ -22,6 +22,13 @@ python src/yields.py     # 全プールのAPYスナップショット
 python src/scoring.py    # 上位候補の履歴を取得し、安定性を加味してスコアリング
 ```
 
+`notebooks/explore_yields.ipynb` を開く場合は、先に `.venv` をJupyterカーネルとして登録すること
+(グローバルのPython環境には依存パッケージが入っていないため、既定のカーネルのままだと動かない)。
+
+```bash
+.venv/Scripts/python -m ipykernel install --user --name defi-yield-optimizer --display-name "Python (defi-yield-optimizer)"
+```
+
 `src/scoring.py` は生APYの平均ではなく中央値を使い、変動係数(apy_cv)が高すぎる
 (閾値1.0超)プールはスコア対象から除外する。異常に高いAPYは大抵、報酬トークンの
 一時的な大量エミッションや薄い流動性による見せかけであり、そのまま鵜呑みにしない
