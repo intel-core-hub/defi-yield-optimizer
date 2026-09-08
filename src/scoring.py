@@ -34,6 +34,11 @@ MAX_TRUSTED_TVL_DRAWDOWN = -0.5  # ピークから50%超のTVL下落があった
 MIN_TRUSTED_PROTOCOL_AGE_DAYS = 90  # これ未満(または不明)の稼働歴は実績が浅いとして減点
 OLD_HACK_PENALTY = 0.3  # 直近ではない過去のハック歴は除外まではしないが大きく減点する
 
+# 借り手・保険引受先など実世界のカウンターパーティに対する信用リスクを内包するカテゴリ。
+# スマートコントラクトが無事でも元本が返ってこない可能性があり、TVL/APYの安定性・
+# 監査数・稼働歴のどれを見ても検知できないため、機械的に候補から除外する。
+EXCLUDED_CATEGORIES = {"Uncollateralized Lending", "RWA Lending", "RWA"}
+
 
 def stability_metrics(history: pd.DataFrame) -> dict:
     apy = history["apy"].dropna()
@@ -87,6 +92,8 @@ def composite_score(row: pd.Series) -> float:
         return np.nan
     if row.get("hack_recent", False):
         return np.nan
+    if row.get("category") in EXCLUDED_CATEGORIES:
+        return np.nan
 
     stability_penalty = 1 / (1 + row["apy_cv"])
     # 期間終了時点の増減(tvl_trend_pct)と期間中の最大下落(tvl_max_drawdown_pct)の
@@ -117,6 +124,8 @@ def _final_flag(row: pd.Series) -> str:
     """
     if row["flag"] == "insufficient_history":
         return "insufficient_history"
+    if row.get("category") in EXCLUDED_CATEGORIES:
+        return "category_excluded"
     if row.get("hack_recent", False):
         return "hacked_protocol_excluded"
     if row["flag"] == "high_volatility_excluded":
@@ -194,26 +203,6 @@ def analyze_top_candidates(
     return result.sort_values("score", ascending=False)
 
 
-def _cap_and_redistribute(weight: pd.Series, group_key: pd.Series, max_weight: float) -> tuple[pd.Series, bool]:
-    """group_key(プールそのもの、project、chainなど)単位の合計weightをmax_weightで
-    キャップし、超過分をキャップされていない側へ比例配分する。1回分の処理を返す。
-    """
-    totals = weight.groupby(group_key).transform("sum")
-    over = totals > max_weight + 1e-9
-    if not over.any():
-        return weight, False
-
-    scale = max_weight / totals[over]
-    excess = (weight[over] * (1 - scale)).sum()
-    weight = weight.copy()
-    weight[over] *= scale
-
-    under = ~over
-    if under.any() and weight[under].sum() > 0:
-        weight[under] += excess * (weight[under] / weight[under].sum())
-    return weight, True
-
-
 def allocate_portfolio(
     ranked: pd.DataFrame,
     top_n: int = 10,
@@ -223,28 +212,39 @@ def allocate_portfolio(
 ) -> pd.DataFrame:
     """スコア上位プールへの資金配分「案」を作る(実際の送金・スワップは行わない)。
 
-    スコアに比例した重みから始め、単一プール/単一プロトコル(同じコントラクト・
-    チームへの集中)/単一チェーン(ブリッジ障害・チェーン停止などチェーン固有障害への
-    集中)への偏りを避けるため、それぞれ上限でキャップし、超過分を他へ比例配分し直す。
-    チェーンの上限をプロトコルより緩め(既定40% vs 35%)にしているのは、単一プロトコル
-    のコントラクトバグの方が単一チェーンの障害より発生確率・被害範囲ともに大きい
-    (プロトコル固有のリスクの方がありふれている)という判断による。厳密な数値の
-    根拠があるわけではなく、目安として調整可能にしている。
+    スコアの高い順に、単一プール/単一プロトコル(同じコントラクト・チームへの集中)/
+    単一チェーン(ブリッジ障害・チェーン停止などチェーン固有障害への集中)の上限に
+    収まる範囲で、貪欲(greedy)に重みを割り当てる。チェーンの上限をプロトコルより
+    緩め(既定40% vs 35%)にしているのは、単一プロトコルのコントラクトバグの方が
+    単一チェーンの障害より発生確率・被害範囲ともに大きい(プロトコル固有のリスクの
+    方がありふれている)という判断による。厳密な数値根拠はなく目安。
+
+    以前は「スコア比例の重みから始め、上限超過分を他へ比例配分し直す」を複数の
+    上限(プール/プロトコル/チェーン)について繰り返す実装だったが、1つの行が
+    複数の上限に同時に抵触するケースで再配分が振動し、実データでスコアが並程度の
+    プールの重みがほぼ0に潰れる不具合を確認した。貪欲法は1回のパスで完結するため
+    そうした振動が原理的に起きない。トレードオフとして、上位に採用できるプールの
+    多様性がtop_n件で足りない場合、100%を配分しきれず端数が残ることがある
+    (その分は、あえて配分先を作らない=未配分として扱う)。
     """
     candidates = ranked.dropna(subset=["score"]).sort_values("score", ascending=False).head(top_n).copy()
     if candidates.empty:
         return candidates.assign(weight=pd.Series(dtype=float))
 
-    weight = candidates["score"] / candidates["score"].sum()
+    remaining = 1.0
+    protocol_used: dict[str, float] = {}
+    chain_used: dict[str, float] = {}
+    weights = []
+    for _, row in candidates.iterrows():
+        protocol_room = max_protocol_weight - protocol_used.get(row["project"], 0.0)
+        chain_room = max_chain_weight - chain_used.get(row["chain"], 0.0)
+        w = max(0.0, min(max_pool_weight, protocol_room, chain_room, remaining))
+        weights.append(w)
+        remaining -= w
+        protocol_used[row["project"]] = protocol_used.get(row["project"], 0.0) + w
+        chain_used[row["chain"]] = chain_used.get(row["chain"], 0.0) + w
 
-    for _ in range(50):
-        weight, pool_changed = _cap_and_redistribute(weight, candidates.index.to_series(), max_pool_weight)
-        weight, protocol_changed = _cap_and_redistribute(weight, candidates["project"], max_protocol_weight)
-        weight, chain_changed = _cap_and_redistribute(weight, candidates["chain"], max_chain_weight)
-        if not (pool_changed or protocol_changed or chain_changed):
-            break
-
-    candidates["weight"] = weight / weight.sum()
+    candidates["weight"] = weights
     return candidates[["chain", "project", "symbol", "score", "weight"]].sort_values("weight", ascending=False)
 
 
@@ -257,17 +257,21 @@ if __name__ == "__main__":
     drawdown_risk = ranked[ranked["flag"] == "tvl_drawdown_risk"]
     hacked = ranked[ranked["flag"] == "hacked_protocol_excluded"]
     past_hack = ranked[ranked["flag"] == "past_hack_risk"]
+    category_excluded = ranked[ranked["flag"] == "category_excluded"]
     print(f"高ボラティリティで除外: {len(excluded)}件 (apy_cv > {MAX_TRUSTED_APY_CV})")
     print(f"TVL急減リスクで減点: {len(drawdown_risk)}件 (max_drawdown < {MAX_TRUSTED_TVL_DRAWDOWN})")
     print(f"直近{RECENT_HACK_WINDOW_DAYS}日以内のハック歴で除外: {len(hacked)}件")
     print(f"それより前のハック歴で減点: {len(past_hack)}件")
+    print(f"カウンターパーティリスク系カテゴリ({', '.join(sorted(EXCLUDED_CATEGORIES))})で除外: {len(category_excluded)}件")
     print()
     print(ranked.dropna(subset=["score"]).head(15).to_string(index=False))
 
     allocation = allocate_portfolio(ranked)
+    unallocated = 1.0 - allocation["weight"].sum()
     print()
     print(
-        "--- 配分案(スコア比例、プール上限20%/プロトコル上限35%/チェーン上限40%。"
-        "実際の送金は行わない) ---"
+        "--- 配分案(スコア順の貪欲割り当て、プール上限20%/プロトコル上限35%/"
+        "チェーン上限40%。実際の送金は行わない) ---"
     )
     print(allocation.to_string(index=False))
+    print(f"未配分(上限に収まる候補が足りなかった分。増額前提ではなく単に据え置き): {unallocated:.1%}")

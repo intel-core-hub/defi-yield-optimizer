@@ -34,7 +34,13 @@ RECENT_HACK_WINDOW_DAYS = 730  # これより新しいハックのみ「除外�
 
 
 def fetch_protocol_static_risk() -> pd.DataFrame:
-    """プロジェクト単位(チェーンを問わない)の監査数・稼働歴。"""
+    """プロジェクト単位(チェーンを問わない)の監査数・稼働歴・カテゴリ。
+
+    `category`は、スマートコントラクトの安全性(監査・稼働歴・ハック有無)だけでは
+    捉えられないリスク、具体的には無担保融資(Uncollateralized Lending)やRWA系
+    (借り手・保険引受先など実世界のカウンターパーティの信用リスクを内包する)を
+    scoring.py側で機械的に除外できるようにするために持たせている。
+    """
     protocols = requests.get(PROTOCOLS_ENDPOINT, timeout=30).json()
 
     now = time.time()
@@ -52,6 +58,7 @@ def fetch_protocol_static_risk() -> pd.DataFrame:
             "project": p["slug"],
             "audits_count": audits_count,
             "protocol_age_days": protocol_age_days,
+            "category": p.get("category"),
         })
 
     # 同じslugが複数エントリに出ることがあるので、より監査数が多い方の情報を残す。
