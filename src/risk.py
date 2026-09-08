@@ -16,6 +16,12 @@ DeFiLlamaの`/protocols`と`/hacks`エンドポイントは、yields.llama.fiの
   と、直近ハックされたばかりのプロトコルが同列(永久除外)になってしまう。
   → `RECENT_HACK_WINDOW_DAYS`より新しいハックは除外対象、それより古いものは減点に留める
   判断をscoring.py側に委ねられるよう、ハックの日付も返す。
+
+注意(API依存リスク): `/protocols`はDeFiLlamaの公開freeエンドポイント一覧に載っているが、
+`/hacks`は本記述時点でその一覧には見当たらない(Pro向けAPIとして案内されている可能性がある)。
+2026-09-08時点では`api.llama.fi/hacks`は実際に応答しているが、将来予告なく仕様変更・廃止
+される可能性がある依存として扱うこと。落ちた場合は`fetch_hack_events()`が例外を送出する
+(呼び出し側で握りつぶさない=ハック判定が壊れたまま除外0件で走り続ける、という事故を防ぐ)。
 """
 
 import sys
@@ -34,7 +40,13 @@ RECENT_HACK_WINDOW_DAYS = 730  # これより新しいハックのみ「除外�
 
 
 def fetch_protocol_static_risk() -> pd.DataFrame:
-    """プロジェクト単位(チェーンを問わない)の監査数・稼働歴・カテゴリ。
+    """プロジェクト単位(チェーンを問わない)の監査数・DeFiLlama掲載日数・カテゴリ。
+
+    `days_since_defillama_listing`という名前にしているのは、これが`listedAt`
+    (DeFiLlamaがそのプロトコルの追跡を開始した日時)からの経過日数であり、
+    プロトコルのコントラクトが実際にいつデプロイ・稼働開始したかの日数ではない
+    (=「プロトコル稼働歴」の代理指標にすぎない)ことを名前で分かるようにするため。
+    実際の稼働開始がDeFiLlama掲載より前のことは普通にある。
 
     `category`は、スマートコントラクトの安全性(監査・稼働歴・ハック有無)だけでは
     捉えられないリスク、具体的には無担保融資(Uncollateralized Lending)やRWA系
@@ -52,12 +64,12 @@ def fetch_protocol_static_risk() -> pd.DataFrame:
             audits_count = 0
 
         listed_at = p.get("listedAt")
-        protocol_age_days = (now - listed_at) / 86400 if listed_at else float("nan")
+        days_since_defillama_listing = (now - listed_at) / 86400 if listed_at else float("nan")
 
         rows.append({
             "project": p["slug"],
             "audits_count": audits_count,
-            "protocol_age_days": protocol_age_days,
+            "days_since_defillama_listing": days_since_defillama_listing,
             "category": p.get("category"),
         })
 

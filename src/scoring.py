@@ -31,8 +31,18 @@ def fetch_pool_history(pool_id: str) -> pd.DataFrame:
 
 MAX_TRUSTED_APY_CV = 1.0  # これを超える変動係数は「異常値/信頼できないデータ」として除外する
 MAX_TRUSTED_TVL_DRAWDOWN = -0.5  # ピークから50%超のTVL下落があった場合は取り付け騒ぎリスクとして減点
-MIN_TRUSTED_PROTOCOL_AGE_DAYS = 90  # これ未満(または不明)の稼働歴は実績が浅いとして減点
+MIN_TRUSTED_LISTING_AGE_DAYS = 90  # DeFiLlama掲載からこれ未満(または不明)なら実績が浅いとして減点
 OLD_HACK_PENALTY = 0.3  # 直近ではない過去のハック歴は除外まではしないが大きく減点する
+
+# analyze_top_candidates()が返すDataFrameの列。候補が0件の場合でもこの列を持つ空の
+# DataFrameを返すことで、呼び出し側(allocate_portfolio()など)が列の有無で落ちないようにする。
+RANKED_COLUMNS = [
+    "chain", "project", "symbol", "pool_id", "current_apy", "tvlUsd",
+    "apy_median", "apy_cv", "tvl_trend_pct", "tvl_max_drawdown_pct", "history_days",
+    "audits_count", "days_since_defillama_listing", "category",
+    "most_recent_hack_date", "hack_days_ago", "was_hacked", "hack_recent",
+    "flag", "score",
+]
 
 # 借り手・保険引受先など実世界のカウンターパーティに対する信用リスクを内包するカテゴリ。
 # スマートコントラクトが無事でも元本が返ってこない可能性があり、TVL/APYの安定性・
@@ -107,9 +117,11 @@ def composite_score(row: pd.Series) -> float:
     audits_count = 0 if pd.isna(audits_count) else audits_count
     audit_penalty = min(1.0, 0.5 + 0.25 * min(audits_count, 2))
 
-    # 稼働歴がMIN_TRUSTED_PROTOCOL_AGE_DAYS未満、またはデータ不明の場合は減点する。
-    age_days = row.get("protocol_age_days", np.nan)
-    age_penalty = 0.5 if pd.isna(age_days) else min(1.0, age_days / MIN_TRUSTED_PROTOCOL_AGE_DAYS)
+    # DeFiLlama掲載からの経過日数がMIN_TRUSTED_LISTING_AGE_DAYS未満、またはデータ不明の
+    # 場合は減点する(実際のコントラクト稼働開始日ではなく、あくまでDeFiLlama掲載日からの
+    # 経過日数であることに注意。掲載前から稼働していたプロトコルはここで過小評価されうる)。
+    listing_age_days = row.get("days_since_defillama_listing", np.nan)
+    age_penalty = 0.5 if pd.isna(listing_age_days) else min(1.0, listing_age_days / MIN_TRUSTED_LISTING_AGE_DAYS)
 
     # 直近ではないが過去にハック歴がある(同一チェーン、またはチェーン不明で全チェーン
     # 適用)場合は、除外はしないが大きく減点する。
@@ -137,6 +149,40 @@ def _final_flag(row: pd.Series) -> str:
     return "ok"
 
 
+def apply_hack_risk(result: pd.DataFrame, hack_events: pd.DataFrame, now: float | None = None) -> pd.DataFrame:
+    """(project, chain)ごとのハック履歴を、候補プールの行に(hack_recent/was_hackedとして)
+    突き合わせる。チェーンが分かっているハックは同じチェーンの行にのみ、チェーンが不明な
+    ハックは同じプロジェクトの全チェーンの行に適用する(保守的に倒す)。
+
+    ネットワーク呼び出しを含まない純粋関数にしてあるのは、単体テストで実際のAPIを
+    叩かずに検証できるようにするため。
+    """
+    if now is None:
+        now = time.time()
+
+    result = result.copy()
+    chain_specific_hacks = (
+        hack_events.dropna(subset=["chain"])
+        .groupby(["project", "chain"])["hack_date"].max()
+        .rename("chain_hack_date")
+        .reset_index()
+    )
+    chain_agnostic_hacks = (
+        hack_events[hack_events["chain"].isna()]
+        .groupby("project")["hack_date"].max()
+        .rename("global_hack_date")
+        .reset_index()
+    )
+    result = result.merge(chain_specific_hacks, on=["project", "chain"], how="left")
+    result = result.merge(chain_agnostic_hacks, on="project", how="left")
+
+    result["most_recent_hack_date"] = result[["chain_hack_date", "global_hack_date"]].max(axis=1, skipna=True)
+    result["hack_days_ago"] = (now - result["most_recent_hack_date"]) / 86400
+    result["was_hacked"] = result["most_recent_hack_date"].notna()
+    result["hack_recent"] = result["was_hacked"] & (result["hack_days_ago"] <= RECENT_HACK_WINDOW_DAYS)
+    return result.drop(columns=["chain_hack_date", "global_hack_date"])
+
+
 def analyze_top_candidates(
     chain: str | None = None,
     stablecoin_only: bool = True,
@@ -162,10 +208,14 @@ def analyze_top_candidates(
             "chain": pool["chain"],
             "project": pool["project"],
             "symbol": pool["symbol"],
+            "pool_id": pool["pool"],
             "current_apy": pool["apy"],
             "tvlUsd": pool["tvlUsd"],
             **metrics,
         })
+
+    if not rows:
+        return pd.DataFrame(columns=RANKED_COLUMNS)
 
     result = pd.DataFrame(rows)
 
@@ -174,29 +224,7 @@ def analyze_top_candidates(
     result["audits_count"] = result["audits_count"].fillna(0)
 
     hack_events = fetch_hack_events()
-    # チェーンが分かっているハックは同じチェーンのプールにのみ適用する。
-    chain_specific_hacks = (
-        hack_events.dropna(subset=["chain"])
-        .groupby(["project", "chain"])["hack_date"].max()
-        .rename("chain_hack_date")
-        .reset_index()
-    )
-    # チェーンが不明なハックは、そのプロジェクトの全チェーンのプールに適用する(保守的)。
-    chain_agnostic_hacks = (
-        hack_events[hack_events["chain"].isna()]
-        .groupby("project")["hack_date"].max()
-        .rename("global_hack_date")
-        .reset_index()
-    )
-    result = result.merge(chain_specific_hacks, on=["project", "chain"], how="left")
-    result = result.merge(chain_agnostic_hacks, on="project", how="left")
-
-    now = time.time()
-    result["most_recent_hack_date"] = result[["chain_hack_date", "global_hack_date"]].max(axis=1, skipna=True)
-    result["hack_days_ago"] = (now - result["most_recent_hack_date"]) / 86400
-    result["was_hacked"] = result["most_recent_hack_date"].notna()
-    result["hack_recent"] = result["was_hacked"] & (result["hack_days_ago"] <= RECENT_HACK_WINDOW_DAYS)
-    result = result.drop(columns=["chain_hack_date", "global_hack_date"])
+    result = apply_hack_risk(result, hack_events)
 
     result["flag"] = result.apply(_final_flag, axis=1)
     result["score"] = result.apply(composite_score, axis=1)
@@ -245,7 +273,9 @@ def allocate_portfolio(
         chain_used[row["chain"]] = chain_used.get(row["chain"], 0.0) + w
 
     candidates["weight"] = weights
-    return candidates[["chain", "project", "symbol", "score", "weight"]].sort_values("weight", ascending=False)
+    return candidates[["chain", "project", "symbol", "pool_id", "score", "weight"]].sort_values(
+        "weight", ascending=False
+    )
 
 
 if __name__ == "__main__":
