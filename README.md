@@ -60,6 +60,21 @@ python src/backtest.py   # スコアリングの判定に予測力があるか�
 障害よりも単一プロトコルのコントラクトバグの方がありふれたリスクという判断だが、厳密な
 数値根拠はなく目安)。あくまで案であり、実際の送金・スワップは行わない。
 
+### スナップショットの自動蓄積
+
+`src/backtest.py`のウォークフォワード検証はDeFiLlamaの提供履歴(プールごとに最大2年半程度)
+の範囲に限られる。自前で時系列を蓄積すれば、より長期・複数の相場局面をまたいだ本来の
+バックテストができるようになるため、`src/snapshot.py`が`analyze_top_candidates()`の結果に
+日時を付けて`data/snapshots/YYYY-MM-DD.csv`へ保存する(`load_snapshots()`で結合読み込み可能)。
+
+Windowsタスクスケジューラに毎日08:00実行で登録済み(タスク名: `DefiYieldOptimizerSnapshot`、
+`scripts/run_snapshot.bat`を実行、ログは`data/snapshot.log`)。
+
+```bash
+schtasks /query /tn "DefiYieldOptimizerSnapshot" /v /fo list   # 状態確認
+schtasks /delete /tn "DefiYieldOptimizerSnapshot" /f           # 削除する場合
+```
+
 ## 注意
 
 - スマートコントラクトリスク、ステーブルコインのデペッグリスク、プロトコルのハッキングリスクは
