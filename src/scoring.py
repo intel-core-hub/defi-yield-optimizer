@@ -4,6 +4,7 @@
 """
 
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +14,7 @@ import requests
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
-from risk import fetch_protocol_risk
+from risk import fetch_hack_events, fetch_protocol_static_risk, RECENT_HACK_WINDOW_DAYS
 from yields import fetch_pools, DATA_DIR
 
 CHART_ENDPOINT = "https://yields.llama.fi/chart/{pool_id}"
@@ -31,6 +32,7 @@ def fetch_pool_history(pool_id: str) -> pd.DataFrame:
 MAX_TRUSTED_APY_CV = 1.0  # これを超える変動係数は「異常値/信頼できないデータ」として除外する
 MAX_TRUSTED_TVL_DRAWDOWN = -0.5  # ピークから50%超のTVL下落があった場合は取り付け騒ぎリスクとして減点
 MIN_TRUSTED_PROTOCOL_AGE_DAYS = 90  # これ未満(または不明)の稼働歴は実績が浅いとして減点
+OLD_HACK_PENALTY = 0.3  # 直近ではない過去のハック歴は除外まではしないが大きく減点する
 
 
 def stability_metrics(history: pd.DataFrame) -> dict:
@@ -71,11 +73,19 @@ def composite_score(row: pd.Series) -> float:
     """中央値APYを、安定性(APY変動・TVL推移)とプロトコルリスク(監査数・稼働歴・
     過去のハック有無)で調整する。
 
-    apy_cvが閾値を超える、または過去にハック被害があるプールはスコア対象外(NaN)にする。
+    除外/減点の判定はすべて個々の生カラム(apy_cv, hack_recent, was_hackedなど)から
+    独立に行う。「flag」列は表示用の要約ラベルにすぎず、ここでの計算には使わない
+    (そうしないと、例えばTVL急減リスクと過去ハックの両方に該当するプールで
+    片方のペナルティしか掛からない、というような取りこぼしが起きる)。
+
+    apy_cvが閾値を超える、または直近(RECENT_HACK_WINDOW_DAYS日以内)にハック被害が
+    あるプールはスコア対象外(NaN)にする。
     """
     if pd.isna(row["apy_cv"]) or pd.isna(row["tvl_trend_pct"]) or pd.isna(row["tvl_max_drawdown_pct"]):
         return np.nan
-    if row["flag"] in ("high_volatility_excluded", "hacked_protocol_excluded"):
+    if row["apy_cv"] > MAX_TRUSTED_APY_CV:
+        return np.nan
+    if row.get("hack_recent", False):
         return np.nan
 
     stability_penalty = 1 / (1 + row["apy_cv"])
@@ -94,7 +104,28 @@ def composite_score(row: pd.Series) -> float:
     age_days = row.get("protocol_age_days", np.nan)
     age_penalty = 0.5 if pd.isna(age_days) else min(1.0, age_days / MIN_TRUSTED_PROTOCOL_AGE_DAYS)
 
-    return row["apy_median"] * stability_penalty * tvl_penalty * audit_penalty * age_penalty
+    # 直近ではないが過去にハック歴がある(同一チェーン、またはチェーン不明で全チェーン
+    # 適用)場合は、除外はしないが大きく減点する。
+    hack_penalty = OLD_HACK_PENALTY if row.get("was_hacked", False) else 1.0
+
+    return row["apy_median"] * stability_penalty * tvl_penalty * audit_penalty * age_penalty * hack_penalty
+
+
+def _final_flag(row: pd.Series) -> str:
+    """表示用の要約フラグ(優先度順)。実際の除外/減点判定はcomposite_scoreが
+    個々のカラムから独立に行うので、ここでの優先順位は表示上の見せ方の問題でしかない。
+    """
+    if row["flag"] == "insufficient_history":
+        return "insufficient_history"
+    if row.get("hack_recent", False):
+        return "hacked_protocol_excluded"
+    if row["flag"] == "high_volatility_excluded":
+        return "high_volatility_excluded"
+    if row.get("was_hacked", False):
+        return "past_hack_risk"
+    if row["flag"] == "tvl_drawdown_risk":
+        return "tvl_drawdown_risk"
+    return "ok"
 
 
 def analyze_top_candidates(
@@ -129,14 +160,58 @@ def analyze_top_candidates(
 
     result = pd.DataFrame(rows)
 
-    risk = fetch_protocol_risk()
-    result = result.merge(risk, on="project", how="left")
+    static_risk = fetch_protocol_static_risk()
+    result = result.merge(static_risk, on="project", how="left")
     result["audits_count"] = result["audits_count"].fillna(0)
-    result["was_hacked"] = result["was_hacked"].fillna(False)
-    result.loc[result["was_hacked"], "flag"] = "hacked_protocol_excluded"
 
+    hack_events = fetch_hack_events()
+    # チェーンが分かっているハックは同じチェーンのプールにのみ適用する。
+    chain_specific_hacks = (
+        hack_events.dropna(subset=["chain"])
+        .groupby(["project", "chain"])["hack_date"].max()
+        .rename("chain_hack_date")
+        .reset_index()
+    )
+    # チェーンが不明なハックは、そのプロジェクトの全チェーンのプールに適用する(保守的)。
+    chain_agnostic_hacks = (
+        hack_events[hack_events["chain"].isna()]
+        .groupby("project")["hack_date"].max()
+        .rename("global_hack_date")
+        .reset_index()
+    )
+    result = result.merge(chain_specific_hacks, on=["project", "chain"], how="left")
+    result = result.merge(chain_agnostic_hacks, on="project", how="left")
+
+    now = time.time()
+    result["most_recent_hack_date"] = result[["chain_hack_date", "global_hack_date"]].max(axis=1, skipna=True)
+    result["hack_days_ago"] = (now - result["most_recent_hack_date"]) / 86400
+    result["was_hacked"] = result["most_recent_hack_date"].notna()
+    result["hack_recent"] = result["was_hacked"] & (result["hack_days_ago"] <= RECENT_HACK_WINDOW_DAYS)
+    result = result.drop(columns=["chain_hack_date", "global_hack_date"])
+
+    result["flag"] = result.apply(_final_flag, axis=1)
     result["score"] = result.apply(composite_score, axis=1)
     return result.sort_values("score", ascending=False)
+
+
+def _cap_and_redistribute(weight: pd.Series, group_key: pd.Series, max_weight: float) -> tuple[pd.Series, bool]:
+    """group_key(プールそのもの、project、chainなど)単位の合計weightをmax_weightで
+    キャップし、超過分をキャップされていない側へ比例配分する。1回分の処理を返す。
+    """
+    totals = weight.groupby(group_key).transform("sum")
+    over = totals > max_weight + 1e-9
+    if not over.any():
+        return weight, False
+
+    scale = max_weight / totals[over]
+    excess = (weight[over] * (1 - scale)).sum()
+    weight = weight.copy()
+    weight[over] *= scale
+
+    under = ~over
+    if under.any() and weight[under].sum() > 0:
+        weight[under] += excess * (weight[under] / weight[under].sum())
+    return weight, True
 
 
 def allocate_portfolio(
@@ -144,11 +219,17 @@ def allocate_portfolio(
     top_n: int = 10,
     max_pool_weight: float = 0.20,
     max_protocol_weight: float = 0.35,
+    max_chain_weight: float = 0.40,
 ) -> pd.DataFrame:
     """スコア上位プールへの資金配分「案」を作る(実際の送金・スワップは行わない)。
 
-    スコアに比例した重みから始め、単一プール/単一プロトコルへの集中を避けるため
-    上限(max_pool_weight/max_protocol_weight)でキャップし、超過分を他へ比例配分し直す。
+    スコアに比例した重みから始め、単一プール/単一プロトコル(同じコントラクト・
+    チームへの集中)/単一チェーン(ブリッジ障害・チェーン停止などチェーン固有障害への
+    集中)への偏りを避けるため、それぞれ上限でキャップし、超過分を他へ比例配分し直す。
+    チェーンの上限をプロトコルより緩め(既定40% vs 35%)にしているのは、単一プロトコル
+    のコントラクトバグの方が単一チェーンの障害より発生確率・被害範囲ともに大きい
+    (プロトコル固有のリスクの方がありふれている)という判断による。厳密な数値の
+    根拠があるわけではなく、目安として調整可能にしている。
     """
     candidates = ranked.dropna(subset=["score"]).sort_values("score", ascending=False).head(top_n).copy()
     if candidates.empty:
@@ -157,29 +238,10 @@ def allocate_portfolio(
     weight = candidates["score"] / candidates["score"].sum()
 
     for _ in range(50):
-        changed = False
-
-        over_pool = weight > max_pool_weight + 1e-9
-        if over_pool.any():
-            excess = (weight[over_pool] - max_pool_weight).sum()
-            weight[over_pool] = max_pool_weight
-            under_pool = ~over_pool
-            if under_pool.any() and weight[under_pool].sum() > 0:
-                weight[under_pool] += excess * (weight[under_pool] / weight[under_pool].sum())
-            changed = True
-
-        protocol_totals = weight.groupby(candidates["project"]).transform("sum")
-        over_protocol = protocol_totals > max_protocol_weight + 1e-9
-        if over_protocol.any():
-            scale = max_protocol_weight / protocol_totals[over_protocol]
-            excess = (weight[over_protocol] * (1 - scale)).sum()
-            weight[over_protocol] *= scale
-            under_protocol = ~over_protocol
-            if under_protocol.any() and weight[under_protocol].sum() > 0:
-                weight[under_protocol] += excess * (weight[under_protocol] / weight[under_protocol].sum())
-            changed = True
-
-        if not changed:
+        weight, pool_changed = _cap_and_redistribute(weight, candidates.index.to_series(), max_pool_weight)
+        weight, protocol_changed = _cap_and_redistribute(weight, candidates["project"], max_protocol_weight)
+        weight, chain_changed = _cap_and_redistribute(weight, candidates["chain"], max_chain_weight)
+        if not (pool_changed or protocol_changed or chain_changed):
             break
 
     candidates["weight"] = weight / weight.sum()
@@ -194,13 +256,18 @@ if __name__ == "__main__":
     excluded = ranked[ranked["flag"] == "high_volatility_excluded"]
     drawdown_risk = ranked[ranked["flag"] == "tvl_drawdown_risk"]
     hacked = ranked[ranked["flag"] == "hacked_protocol_excluded"]
+    past_hack = ranked[ranked["flag"] == "past_hack_risk"]
     print(f"高ボラティリティで除外: {len(excluded)}件 (apy_cv > {MAX_TRUSTED_APY_CV})")
     print(f"TVL急減リスクで減点: {len(drawdown_risk)}件 (max_drawdown < {MAX_TRUSTED_TVL_DRAWDOWN})")
-    print(f"過去のハック歴で除外: {len(hacked)}件")
+    print(f"直近{RECENT_HACK_WINDOW_DAYS}日以内のハック歴で除外: {len(hacked)}件")
+    print(f"それより前のハック歴で減点: {len(past_hack)}件")
     print()
     print(ranked.dropna(subset=["score"]).head(15).to_string(index=False))
 
     allocation = allocate_portfolio(ranked)
     print()
-    print("--- 配分案(スコア比例、プール上限20%/プロトコル上限35%。実際の送金は行わない) ---")
+    print(
+        "--- 配分案(スコア比例、プール上限20%/プロトコル上限35%/チェーン上限40%。"
+        "実際の送金は行わない) ---"
+    )
     print(allocation.to_string(index=False))

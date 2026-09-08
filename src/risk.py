@@ -3,9 +3,19 @@
 DeFiLlamaの`/protocols`と`/hacks`エンドポイントは、yields.llama.fiの`pools`が返す
 `project`スラッグ(例: "aave-v3")とそのまま一致するので、それをキーに突き合わせる。
 
-注意: `/hacks`は`defillamaId`単位で紐づいており、同じdefillamaIdを共有する旧バージョン
-(例: aaveのv1/v2/v3)がまとめて「ハック被害あり」扱いになることがある。過剰検出(false
-positive)の方向に倒れるが、安全側に振る設計として許容している。
+`/protocols`の`id`はバージョンごとに別々に振られている(例: aave-v2とaave-v3のidは別、
+複数slugが同じidを共有することはない)ので、`/hacks`の`defillamaId`で突き合わせる限り
+「別バージョンのハックが誤って巻き込まれる」ことは起きない。
+
+ただし以下2点はより粗い/誤検出の余地があるため、この2点を精緻化する:
+- ハックは特定チェーンでのみ起きることが多い(`/hacks`の`chain`フィールド)。プロジェクト単位
+  でしか見ないと、無関係な別チェーンのプールまで巻き込んで除外してしまう。
+  → `fetch_hack_events()`は(project, chain)単位でハック履歴を返し、chainが不明な記録
+  だけプロジェクト全体に適用する(保守的に倒す)。
+- 発生時期を考慮しないと、何年も前に一度ハックされて以降ずっと安全に稼働しているプロトコル
+  と、直近ハックされたばかりのプロトコルが同列(永久除外)になってしまう。
+  → `RECENT_HACK_WINDOW_DAYS`より新しいハックは除外対象、それより古いものは減点に留める
+  判断をscoring.py側に委ねられるよう、ハックの日付も返す。
 """
 
 import sys
@@ -20,11 +30,12 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 PROTOCOLS_ENDPOINT = "https://api.llama.fi/protocols"
 HACKS_ENDPOINT = "https://api.llama.fi/hacks"
 
+RECENT_HACK_WINDOW_DAYS = 730  # これより新しいハックのみ「除外」対象。古いものは減点に留める
 
-def fetch_protocol_risk() -> pd.DataFrame:
+
+def fetch_protocol_static_risk() -> pd.DataFrame:
+    """プロジェクト単位(チェーンを問わない)の監査数・稼働歴。"""
     protocols = requests.get(PROTOCOLS_ENDPOINT, timeout=30).json()
-    hacks = requests.get(HACKS_ENDPOINT, timeout=30).json()
-    hacked_ids = {h["defillamaId"] for h in hacks if h.get("defillamaId")}
 
     now = time.time()
     rows = []
@@ -41,22 +52,60 @@ def fetch_protocol_risk() -> pd.DataFrame:
             "project": p["slug"],
             "audits_count": audits_count,
             "protocol_age_days": protocol_age_days,
-            "was_hacked": p.get("id") in hacked_ids,
         })
 
-    # 同じslugが複数エントリに出ることがあるので、最もリスクが低い(監査数が多い/
-    # ハック無し)方の情報を優先して残す。
+    # 同じslugが複数エントリに出ることがあるので、より監査数が多い方の情報を残す。
     return (
         pd.DataFrame(rows)
-        .sort_values(["was_hacked", "audits_count"], ascending=[True, False])
+        .sort_values("audits_count", ascending=False)
         .drop_duplicates(subset="project", keep="first")
     )
 
 
+def fetch_hack_events() -> pd.DataFrame:
+    """(project, chain)単位のハック履歴。
+
+    `chain`がNaNの行は、そのハックがどのチェーンを対象にしたか`/hacks`側に記録が
+    無かったことを意味し、呼び出し側ではプロジェクトの全チェーンに適用すべき
+    (保守的に倒す)。
+    """
+    protocols = requests.get(PROTOCOLS_ENDPOINT, timeout=30).json()
+    hacks = requests.get(HACKS_ENDPOINT, timeout=30).json()
+    id_to_slug = {p["id"]: p["slug"] for p in protocols}
+
+    rows = []
+    for h in hacks:
+        slug = id_to_slug.get(h.get("defillamaId"))
+        if not slug:
+            continue
+        chains = h.get("chain") or [None]
+        for chain in chains:
+            rows.append({
+                "project": slug,
+                "chain": chain,
+                "hack_date": h.get("date"),
+                "hack_name": h.get("name"),
+            })
+
+    if not rows:
+        return pd.DataFrame(columns=["project", "chain", "hack_date", "hack_name"])
+    return pd.DataFrame(rows)
+
+
 if __name__ == "__main__":
-    risk = fetch_protocol_risk()
-    print(f"プロトコル数: {len(risk)}")
-    print(f"過去にハック被害あり: {int(risk['was_hacked'].sum())}件")
-    print(f"監査0件: {int((risk['audits_count'] == 0).sum())}件")
+    static_risk = fetch_protocol_static_risk()
+    hack_events = fetch_hack_events()
+    now = time.time()
+    hack_events["days_ago"] = (now - hack_events["hack_date"]) / 86400
+    recent = hack_events[hack_events["days_ago"] <= RECENT_HACK_WINDOW_DAYS]
+
+    print(f"プロトコル数: {len(static_risk)}")
+    print(f"監査0件: {int((static_risk['audits_count'] == 0).sum())}件")
+    print(f"ハック記録(プロジェクト×チェーン単位、重複含む): {len(hack_events)}件")
+    print(f"うち直近{RECENT_HACK_WINDOW_DAYS}日以内: {len(recent)}件")
     print()
-    print(risk[risk["was_hacked"]].head(15).to_string(index=False))
+    print(
+        hack_events.sort_values("hack_date", ascending=False)
+        .head(15)[["project", "chain", "hack_name", "days_ago"]]
+        .to_string(index=False)
+    )
