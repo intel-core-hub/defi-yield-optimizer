@@ -1,6 +1,7 @@
 import pandas as pd
+import pytest
 
-from scoring import allocate_portfolio
+from scoring import DEFAULT_UNKNOWN_CHAIN_GAS_JPY, allocate_portfolio
 
 
 def _ranked(rows: list[dict]) -> pd.DataFrame:
@@ -50,3 +51,36 @@ def test_pool_id_is_preserved_for_disambiguation():
 def test_empty_ranked_returns_empty():
     result = allocate_portfolio(pd.DataFrame(columns=["chain", "project", "symbol", "score"]))
     assert result.empty
+
+
+def test_no_capital_jpy_omits_gas_columns():
+    rows = [{"chain": "Ethereum", "project": "p1", "symbol": "USDC", "pool_id": "pool-1", "score": 10.0}]
+    result = allocate_portfolio(_ranked(rows), top_n=10)
+    assert "est_gas_jpy" not in result.columns
+    assert "high_gas_cost_warning" not in result.columns
+
+
+def test_capital_jpy_adds_gas_columns_and_flags_expensive_chain():
+    rows = [
+        {"chain": "Ethereum", "project": "p1", "symbol": "USDC", "pool_id": "pool-1", "score": 10.0},
+        {"chain": "Arbitrum", "project": "p2", "symbol": "USDC", "pool_id": "pool-2", "score": 9.0},
+    ]
+    # 1万円規模。各プール20%上限なので1プールあたり2000円程度のポジションになる。
+    result = allocate_portfolio(_ranked(rows), top_n=10, capital_jpy=10_000.0)
+
+    eth_row = result[result["chain"] == "Ethereum"].iloc[0]
+    arb_row = result[result["chain"] == "Arbitrum"].iloc[0]
+
+    assert eth_row["est_gas_jpy"] == 459
+    assert arb_row["est_gas_jpy"] == 15
+    assert eth_row["position_jpy"] == pytest.approx(eth_row["weight"] * 10_000.0)
+    # イーサリアムはポジションの小ささに対してガス代の比率が高く、警告が立つはず。
+    assert bool(eth_row["high_gas_cost_warning"]) is True
+    # Arbitrumは比率が十分低く、警告は立たないはず。
+    assert bool(arb_row["high_gas_cost_warning"]) is False
+
+
+def test_unknown_chain_uses_conservative_default_gas():
+    rows = [{"chain": "SomeNewChain", "project": "p1", "symbol": "USDC", "pool_id": "pool-1", "score": 10.0}]
+    result = allocate_portfolio(_ranked(rows), top_n=10, capital_jpy=10_000.0)
+    assert result.iloc[0]["est_gas_jpy"] == DEFAULT_UNKNOWN_CHAIN_GAS_JPY

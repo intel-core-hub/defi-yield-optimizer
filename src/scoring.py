@@ -5,6 +5,7 @@
 
 import sys
 import time
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -34,10 +35,15 @@ MAX_TRUSTED_TVL_DRAWDOWN = -0.5  # ピークから50%超のTVL下落があった
 MIN_TRUSTED_LISTING_AGE_DAYS = 90  # DeFiLlama掲載からこれ未満(または不明)なら実績が浅いとして減点
 OLD_HACK_PENALTY = 0.3  # 直近ではない過去のハック歴は除外まではしないが大きく減点する
 
+# 現在のAPYのうちこの割合超が報酬トークン(apyReward)由来なら除外する。apy_cvは合計APYの
+# 変動しか見ておらず、緩やかに逓減する発行スケジュールは短い観測窓では「安定」に見えてしまう
+# ため、apy_cvとは独立にAPYの構成比そのものをチェックする。
+MAX_TRUSTED_REWARD_SHARE = 0.8
+
 # analyze_top_candidates()が返すDataFrameの列。候補が0件の場合でもこの列を持つ空の
 # DataFrameを返すことで、呼び出し側(allocate_portfolio()など)が列の有無で落ちないようにする。
 RANKED_COLUMNS = [
-    "chain", "project", "symbol", "pool_id", "current_apy", "tvlUsd",
+    "chain", "project", "symbol", "pool_id", "current_apy", "apy_reward_share", "tvlUsd",
     "apy_median", "apy_cv", "tvl_trend_pct", "tvl_max_drawdown_pct", "history_days",
     "audits_count", "days_since_defillama_listing", "category",
     "most_recent_hack_date", "hack_days_ago", "was_hacked", "hack_recent",
@@ -84,6 +90,22 @@ def stability_metrics(history: pd.DataFrame) -> dict:
     }
 
 
+def _apy_reward_share(pool: pd.Series) -> float:
+    """現在のAPYのうち報酬トークン(apyReward)が占める割合。
+
+    `/pools`エンドポイントが返す`apyReward`/`apyBase`は追加のAPI呼び出しなしで既に
+    取得済みのデータ。APYがそもそも0/欠損ならNaN(判定不能)、報酬トークンによる
+    上乗せが無ければ0.0を返す。
+    """
+    current_apy = pool.get("apy")
+    if current_apy is None or pd.isna(current_apy) or current_apy == 0:
+        return float("nan")
+    apy_reward = pool.get("apyReward")
+    if apy_reward is None or pd.isna(apy_reward):
+        return 0.0
+    return float(apy_reward / current_apy)
+
+
 def composite_score(row: pd.Series) -> float:
     """中央値APYを、安定性(APY変動・TVL推移)とプロトコルリスク(監査数・稼働歴・
     過去のハック有無)で調整する。
@@ -103,6 +125,9 @@ def composite_score(row: pd.Series) -> float:
     if row.get("hack_recent", False):
         return np.nan
     if row.get("category") in EXCLUDED_CATEGORIES:
+        return np.nan
+    reward_share = row.get("apy_reward_share", np.nan)
+    if not pd.isna(reward_share) and reward_share > MAX_TRUSTED_REWARD_SHARE:
         return np.nan
 
     stability_penalty = 1 / (1 + row["apy_cv"])
@@ -140,6 +165,9 @@ def _final_flag(row: pd.Series) -> str:
         return "category_excluded"
     if row.get("hack_recent", False):
         return "hacked_protocol_excluded"
+    reward_share = row.get("apy_reward_share", np.nan)
+    if not pd.isna(reward_share) and reward_share > MAX_TRUSTED_REWARD_SHARE:
+        return "reward_dependent_excluded"
     if row["flag"] == "high_volatility_excluded":
         return "high_volatility_excluded"
     if row.get("was_hacked", False):
@@ -210,6 +238,7 @@ def analyze_top_candidates(
             "symbol": pool["symbol"],
             "pool_id": pool["pool"],
             "current_apy": pool["apy"],
+            "apy_reward_share": _apy_reward_share(pool),
             "tvlUsd": pool["tvlUsd"],
             **metrics,
         })
@@ -231,12 +260,52 @@ def analyze_top_candidates(
     return result.sort_values("score", ascending=False)
 
 
+# チェーンごとのラウンドトリップ(入金+出金、必要ならスワップ込み)の想定ガス代(円)。
+# 厳密な実測値ではなく、小額資金での実行可否を大まかに判断するための目安。実際の執行
+# 直前には必ずガストラッカーで確認すること(混雑時はこれより大きく跳ねうる)。
+# GAS_TABLE_LAST_REVIEWED時点のドル建て目安(Ethereum≈$3.0、他チェーン≈$0.1)を
+# 1ドル=153円(同日の実勢レート)で円換算したもの。
+ROUGH_ROUNDTRIP_GAS_JPY = {
+    "Ethereum": 459,
+    "Arbitrum": 15,
+    "Base": 15,
+    "Optimism": 15,
+    "Polygon": 15,
+}
+DEFAULT_UNKNOWN_CHAIN_GAS_JPY = 765  # テーブルに無いチェーンは保守的に高めに倒す(≈$5.0換算)
+HIGH_GAS_COST_WARNING_PCT = 0.05  # 想定コストがポジション額のこの割合を超えたら警告フラグ
+
+# ガス代(円換算)は為替レート・ネットワーク混雑状況によって時間とともにずれていく想定値。
+# 放置して古い値を信用し続ける事故を防ぐため、一定期間ごとに見直しを促す仕組みにしている。
+GAS_TABLE_LAST_REVIEWED = date(2026, 9, 10)
+GAS_TABLE_REVIEW_INTERVAL_DAYS = 90
+
+
+def _warn_if_gas_table_stale(today: date | None = None) -> None:
+    """ガス代テーブルの最終レビュー日からGAS_TABLE_REVIEW_INTERVAL_DAYSを超えて
+    経過していたら、標準エラー出力に警告する。値そのものを自動更新はしない
+    (為替レート・混雑状況の確認は手動で行い、確認後にROUGH_ROUNDTRIP_GAS_JPYと
+    GAS_TABLE_LAST_REVIEWEDの両方を更新する運用を想定)。
+    """
+    if today is None:
+        today = date.today()
+    days_since_review = (today - GAS_TABLE_LAST_REVIEWED).days
+    if days_since_review > GAS_TABLE_REVIEW_INTERVAL_DAYS:
+        print(
+            f"[警告] ガス代テーブル(ROUGH_ROUNDTRIP_GAS_JPY)は{days_since_review}日前"
+            f"({GAS_TABLE_LAST_REVIEWED}時点)に見直されたままです。現在のガス代・為替レートを"
+            "確認し、値とGAS_TABLE_LAST_REVIEWEDを更新してください。",
+            file=sys.stderr,
+        )
+
+
 def allocate_portfolio(
     ranked: pd.DataFrame,
     top_n: int = 10,
     max_pool_weight: float = 0.20,
     max_protocol_weight: float = 0.35,
     max_chain_weight: float = 0.40,
+    capital_jpy: float | None = None,
 ) -> pd.DataFrame:
     """スコア上位プールへの資金配分「案」を作る(実際の送金・スワップは行わない)。
 
@@ -254,6 +323,11 @@ def allocate_portfolio(
     そうした振動が原理的に起きない。トレードオフとして、上位に採用できるプールの
     多様性がtop_n件で足りない場合、100%を配分しきれず端数が残ることがある
     (その分は、あえて配分先を作らない=未配分として扱う)。
+
+    `capital_jpy`(投入予定額、円)を渡すと、チェーン別の粗いガス代目安
+    (`ROUGH_ROUNDTRIP_GAS_JPY`)を使って各プールの想定実行コストを見積もり、
+    `est_gas_jpy`/`position_jpy`/`gas_pct_of_position`/`high_gas_cost_warning`列を
+    追加する。渡さない場合はこれらの列を追加しない(従来通りの出力)。
     """
     candidates = ranked.dropna(subset=["score"]).sort_values("score", ascending=False).head(top_n).copy()
     if candidates.empty:
@@ -273,9 +347,22 @@ def allocate_portfolio(
         chain_used[row["chain"]] = chain_used.get(row["chain"], 0.0) + w
 
     candidates["weight"] = weights
-    return candidates[["chain", "project", "symbol", "pool_id", "score", "weight"]].sort_values(
-        "weight", ascending=False
-    )
+    output_cols = ["chain", "project", "symbol", "pool_id", "score", "weight"]
+
+    if capital_jpy is not None:
+        _warn_if_gas_table_stale()
+        candidates["est_gas_jpy"] = candidates["chain"].map(
+            lambda c: ROUGH_ROUNDTRIP_GAS_JPY.get(c, DEFAULT_UNKNOWN_CHAIN_GAS_JPY)
+        )
+        candidates["position_jpy"] = candidates["weight"] * capital_jpy
+        candidates["gas_pct_of_position"] = candidates.apply(
+            lambda r: (r["est_gas_jpy"] / r["position_jpy"]) if r["position_jpy"] > 0 else float("nan"),
+            axis=1,
+        )
+        candidates["high_gas_cost_warning"] = candidates["gas_pct_of_position"] > HIGH_GAS_COST_WARNING_PCT
+        output_cols += ["est_gas_jpy", "position_jpy", "gas_pct_of_position", "high_gas_cost_warning"]
+
+    return candidates[output_cols].sort_values("weight", ascending=False)
 
 
 if __name__ == "__main__":
@@ -288,15 +375,21 @@ if __name__ == "__main__":
     hacked = ranked[ranked["flag"] == "hacked_protocol_excluded"]
     past_hack = ranked[ranked["flag"] == "past_hack_risk"]
     category_excluded = ranked[ranked["flag"] == "category_excluded"]
+    reward_excluded = ranked[ranked["flag"] == "reward_dependent_excluded"]
     print(f"高ボラティリティで除外: {len(excluded)}件 (apy_cv > {MAX_TRUSTED_APY_CV})")
     print(f"TVL急減リスクで減点: {len(drawdown_risk)}件 (max_drawdown < {MAX_TRUSTED_TVL_DRAWDOWN})")
     print(f"直近{RECENT_HACK_WINDOW_DAYS}日以内のハック歴で除外: {len(hacked)}件")
     print(f"それより前のハック歴で減点: {len(past_hack)}件")
     print(f"カウンターパーティリスク系カテゴリ({', '.join(sorted(EXCLUDED_CATEGORIES))})で除外: {len(category_excluded)}件")
+    print(f"報酬トークン依存(apy_reward_share > {MAX_TRUSTED_REWARD_SHARE})で除外: {len(reward_excluded)}件")
     print()
     print(ranked.dropna(subset=["score"]).head(15).to_string(index=False))
 
-    allocation = allocate_portfolio(ranked)
+    # 投入予定額(円)をコマンドライン引数で渡すと、チェーン別ガス代目安から
+    # ガス代/ポジション比率の警告列も出す。例: python src/scoring.py 50000
+    capital_jpy = float(sys.argv[1]) if len(sys.argv) > 1 else None
+
+    allocation = allocate_portfolio(ranked, capital_jpy=capital_jpy)
     unallocated = 1.0 - allocation["weight"].sum()
     print()
     print(
@@ -305,3 +398,8 @@ if __name__ == "__main__":
     )
     print(allocation.to_string(index=False))
     print(f"未配分(上限に収まる候補が足りなかった分。増額前提ではなく単に据え置き): {unallocated:.1%}")
+    if capital_jpy is None:
+        print(
+            "ガス代/ポジション比率の目安も見る場合は "
+            "`python src/scoring.py <投入予定額(円)>` のように実行してください。"
+        )
