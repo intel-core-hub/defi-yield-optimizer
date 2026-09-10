@@ -4,6 +4,7 @@ import pytest
 
 from scoring import (
     MAX_TRUSTED_APY_CV,
+    MAX_TRUSTED_REWARD_SHARE,
     MIN_TRUSTED_LISTING_AGE_DAYS,
     OLD_HACK_PENALTY,
     composite_score,
@@ -69,3 +70,20 @@ def test_tvl_drawdown_and_old_hack_penalties_both_apply():
 def test_missing_metrics_is_nan():
     row = _base_row(apy_cv=np.nan)
     assert np.isnan(composite_score(row))
+
+
+def test_high_reward_share_excluded_is_nan():
+    # apy_cv自体は安定していても、APYの大部分が報酬トークン由来なら除外する。
+    row = _base_row(apy_reward_share=MAX_TRUSTED_REWARD_SHARE + 0.01)
+    assert np.isnan(composite_score(row))
+
+
+def test_reward_share_below_threshold_not_excluded():
+    row = _base_row(apy_reward_share=MAX_TRUSTED_REWARD_SHARE - 0.01)
+    assert composite_score(row) == pytest.approx(10.0)
+
+
+def test_missing_reward_share_does_not_exclude():
+    # apy_reward_share列が無い(古い呼び出し元・NaN)場合でも、他の判定に影響しない。
+    row = _base_row()
+    assert composite_score(row) == pytest.approx(10.0)
