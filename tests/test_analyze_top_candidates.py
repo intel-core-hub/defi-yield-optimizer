@@ -1,4 +1,7 @@
+import logging
+
 import pandas as pd
+import requests
 
 from scoring import RANKED_COLUMNS, analyze_top_candidates
 
@@ -23,3 +26,21 @@ def test_zero_candidates_returns_empty_dataframe_with_expected_columns(monkeypat
 
     assert list(result.columns) == RANKED_COLUMNS
     assert len(result) == 0
+
+
+def test_pool_history_fetch_failure_is_logged_not_silent(monkeypatch, caplog):
+    monkeypatch.setattr("scoring.fetch_pools", _fake_pools)
+
+    def _raise(pool_id):
+        raise requests.RequestException("boom")
+
+    monkeypatch.setattr("scoring.fetch_pool_history", _raise)
+
+    with caplog.at_level(logging.WARNING, logger="scoring"):
+        result = analyze_top_candidates(min_tvl_usd=0)
+
+    assert len(result) == 0
+    assert any(
+        "11111111-1111-1111-1111-111111111111" in record.message
+        for record in caplog.records
+    )

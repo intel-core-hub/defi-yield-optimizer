@@ -1,0 +1,395 @@
+review_date: 2026-09-11
+
+# この日時点でscoring.pyが"ok"と判定した7プールをレビュー対象として固定する。
+# 以後ランキングが変動しても、このsnapshotに含まれるpool_idのみがPhase Bの対象。
+# 対象を変更したい場合は、このファイルを書き換えず新しい日付のYAMLを追加する。
+selection_snapshot:
+  generated_at: "2026-09-11T14:50:00Z"
+  source: defillama
+  algorithm_version: "34fb302"  # scoring.py実行時点のgit commit (short hash)
+  selected_pool_ids:
+    - 0ce62070-5201-47d1-84d5-f76d7e0cf5c0
+    - 576837c2-4d9c-5783-8543-df63fcb34d80
+    - 3e78432a-f58b-46b2-ba69-1b446efc3e21
+    - 7abaf885-bad2-4531-8550-37b2313f2f76
+    - b6490fe9-b16a-4ccf-8701-cbded659b397
+    - 0e594c5e-79e3-4ce8-85aa-661dfd9e8ed8
+    - 894ef05d-8143-4fa2-9a1c-bebc14686337
+
+pools:
+  - pool_id: 0ce62070-5201-47d1-84d5-f76d7e0cf5c0
+    protocol: ember-protocol
+    chain: Sui
+    symbol: USDC
+
+    pool_address: null
+    market_address: null
+    vault_address: null
+
+    implementation_address: null
+    sy_address: null
+    pt_address: null
+    yt_address: null
+    expiry: null
+
+    underlying_asset: "0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC"
+    underlying_protocol: null  # poolMeta="R25 Treasury"。R25自体がunderlying protocolかは未確認
+
+    audit_reports:
+      - auditor: null
+        report_url: "https://ember.so/documents/ember_protocol_audit.pdf"
+        report_date: null
+        scope_repository: null
+        scope_commit: null
+        findings:
+          critical: null
+          high: null
+          medium: null
+        unresolved_critical: null
+        unresolved_high: null
+
+    deployed_code_verified: null
+    audit_scope_matches_deployment: null
+
+    admin: null
+    upgrade_authority: null
+    multisig: null
+    emergency_roles: null
+
+    custody_risk: null
+    oracle_risk: null
+    counterparty_risk: null
+
+    phase_b_status: pending
+    reviewer_notes: >
+      監査PDFの存在(ember.so/documents/ember_protocol_audit.pdf)は確認したが、
+      auditor名・監査対象commit・Critical/High件数は未読のため未確認。DeFiLlamaの
+      /pools APIには対象vaultのSui object IDが含まれないため、実際にどのvault
+      object・どのpackage revisionを使っているかは本ファイル作成時点では特定できて
+      いない(Ember側のアプリ/エクスプローラーでの手動特定が必要)。過去のチャットで
+      「監査/formal verification確認済み、残作業はdeployed packageとの照合のみ」と
+      整理されたことがあるが、その確認内容を本ファイル作成時に直接検証できていない
+      ため、ここではpendingのまま据え置く。poolMetaの"R25 Treasury"がunderlying
+      protocolを指す可能性があり、要確認。
+
+  - pool_id: 576837c2-4d9c-5783-8543-df63fcb34d80
+    protocol: pendle-v2
+    chain: Ethereum
+    symbol: STRUSD
+
+    pool_address: "0xac028348c46d3455899a2b9b50077c11960eaddb"  # Pendle Market
+    market_address: "0xac028348c46d3455899a2b9b50077c11960eaddb"
+    vault_address: null
+
+    implementation_address: null
+    sy_address: "0x7e8a16e87fa6b0f2e657db47f3dbfe2e981ef211"
+    pt_address: "0x74299580811e1c3c1a2831db079ba0a8f513998f"
+    yt_address: "0xc4bb3ec6588ff14d7676445a40f2716e690a3203"
+    expiry: "2026-11-26"
+
+    underlying_asset: "0x280839980a7ed0d7717f64125fe241012e5f5815"  # strUSD
+    underlying_protocol: null  # strUSD発行体名・監査状況ともに未確認
+
+    audit_reports:
+      - auditor: null
+        report_url: "https://github.com/pendle-finance/pendle-core-v2-public/tree/main/audits"
+        report_date: null
+        scope_repository: "pendle-finance/pendle-core-v2-public"
+        scope_commit: null
+        findings:
+          critical: null
+          high: null
+          medium: null
+        unresolved_critical: null
+        unresolved_high: null
+
+    deployed_code_verified: null
+    audit_scope_matches_deployment: null
+
+    admin: null
+    upgrade_authority: null
+    multisig: null
+    emergency_roles: null
+
+    custody_risk: null
+    oracle_risk: null
+    counterparty_risk: null
+
+    phase_b_status: pending
+    reviewer_notes: >
+      Market/SY/PT/YTアドレスはPendle公開API(api-v2.pendle.finance)から取得し、
+      underlyingAssetアドレスがDeFiLlamaのunderlyingTokensと完全一致することを確認
+      済み(pool_id取り違えの可能性は排除できた)。ただしPendle Core監査(2件、
+      github上のaudits配下)がコア実装のみを対象にしているのか、本Market固有のSY
+      実装(strUSD向けアダプタ)まで含むのかは未確認。またstrUSD自体の発行体・監査
+      状況は未調査。expiry 2026-11-26。
+
+  - pool_id: 7abaf885-bad2-4531-8550-37b2313f2f76
+    protocol: pendle-v2
+    chain: Ethereum
+    symbol: REUSD
+
+    pool_address: "0x13285bcbc27f92b47b4edb99d744c07b48c977c0"
+    market_address: "0x13285bcbc27f92b47b4edb99d744c07b48c977c0"
+    vault_address: null
+
+    implementation_address: null
+    sy_address: "0x9487bd5a3b16ecb5f3184453e3ee75b800141648"
+    pt_address: "0xecfafdc7741323a945a163ed068b5a3c43483957"
+    yt_address: "0xa8bd3b21291ace53927b35563fc80615919e63d7"
+    expiry: "2026-12-10"
+
+    underlying_asset: "0x5086bf358635b81d8c47c66d1c8b9e567db70c72"  # reUSD
+    underlying_protocol: null
+
+    audit_reports:
+      - auditor: null
+        report_url: "https://github.com/pendle-finance/pendle-core-v2-public/tree/main/audits"
+        report_date: null
+        scope_repository: "pendle-finance/pendle-core-v2-public"
+        scope_commit: null
+        findings:
+          critical: null
+          high: null
+          medium: null
+        unresolved_critical: null
+        unresolved_high: null
+
+    deployed_code_verified: null
+    audit_scope_matches_deployment: null
+
+    admin: null
+    upgrade_authority: null
+    multisig: null
+    emergency_roles: null
+
+    custody_risk: null
+    oracle_risk: null
+    counterparty_risk: null
+
+    phase_b_status: pending
+    reviewer_notes: >
+      Market/SY/PT/YTアドレスはPendle公開API経由で取得し、underlyingAssetアドレスが
+      DeFiLlamaのunderlyingTokensと完全一致することを確認済み。reUSD発行体・SY固有
+      実装の監査状況は未確認。expiry 2026-12-10。categoryIdsに"rexyz"を含み、
+      reUSD自体がRWA(現実資産)系の可能性があるため、underlying_protocolの確認は
+      特に優先度を上げて行うことを推奨。
+
+  - pool_id: b6490fe9-b16a-4ccf-8701-cbded659b397
+    protocol: pendle-v2
+    chain: Ethereum
+    symbol: USD3
+
+    pool_address: "0x4a5067c3ff1abb7449244025b0e37feaf77d8e3e"
+    market_address: "0x4a5067c3ff1abb7449244025b0e37feaf77d8e3e"
+    vault_address: null
+
+    implementation_address: null
+    sy_address: "0xea3bc608f32847b97965c5e1648bdfcd4c2c40d0"
+    pt_address: "0x7f47c3e6b2c00fc4eb4d5ae50d0ab0ab6888eb4d"
+    yt_address: "0x5cffcc9ddef0fdcf395e2ea24ca5ed5a12032706"
+    expiry: "2026-12-17"
+
+    underlying_asset: "0x056b269eb1f75477a8666ae8c7fe01b64dd55ecc"  # USD3
+    underlying_protocol: null
+
+    audit_reports:
+      - auditor: null
+        report_url: "https://github.com/pendle-finance/pendle-core-v2-public/tree/main/audits"
+        report_date: null
+        scope_repository: "pendle-finance/pendle-core-v2-public"
+        scope_commit: null
+        findings:
+          critical: null
+          high: null
+          medium: null
+        unresolved_critical: null
+        unresolved_high: null
+
+    deployed_code_verified: null
+    audit_scope_matches_deployment: null
+
+    admin: null
+    upgrade_authority: null
+    multisig: null
+    emergency_roles: null
+
+    custody_risk: null
+    oracle_risk: null
+    counterparty_risk: null
+
+    phase_b_status: pending
+    reviewer_notes: >
+      DeFiLlama上ではPT購入用プールとして登録(poolMeta="For buying PT-USD3-
+      17DEC2026")。同一Pendle Marketに対するLP提供プール(pool_id 0e594c5e)と
+      market/sy/pt/yt/expiryを共有する。USD3発行体の監査状況は未確認。
+
+  - pool_id: 0e594c5e-79e3-4ce8-85aa-661dfd9e8ed8
+    protocol: pendle-v2
+    chain: Ethereum
+    symbol: USD3
+
+    pool_address: "0x4a5067c3ff1abb7449244025b0e37feaf77d8e3e"
+    market_address: "0x4a5067c3ff1abb7449244025b0e37feaf77d8e3e"
+    vault_address: null
+
+    implementation_address: null
+    sy_address: "0xea3bc608f32847b97965c5e1648bdfcd4c2c40d0"
+    pt_address: "0x7f47c3e6b2c00fc4eb4d5ae50d0ab0ab6888eb4d"
+    yt_address: "0x5cffcc9ddef0fdcf395e2ea24ca5ed5a12032706"
+    expiry: "2026-12-17"
+
+    underlying_asset: "0x056b269eb1f75477a8666ae8c7fe01b64dd55ecc"  # USD3
+    underlying_protocol: null
+
+    audit_reports:
+      - auditor: null
+        report_url: "https://github.com/pendle-finance/pendle-core-v2-public/tree/main/audits"
+        report_date: null
+        scope_repository: "pendle-finance/pendle-core-v2-public"
+        scope_commit: null
+        findings:
+          critical: null
+          high: null
+          medium: null
+        unresolved_critical: null
+        unresolved_high: null
+
+    deployed_code_verified: null
+    audit_scope_matches_deployment: null
+
+    admin: null
+    upgrade_authority: null
+    multisig: null
+    emergency_roles: null
+
+    custody_risk: null
+    oracle_risk: null
+    counterparty_risk: null
+
+    phase_b_status: pending
+    reviewer_notes: >
+      pool_id b6490fe9(PT購入)と同一のPendle Marketに対するLP提供プール
+      (poolMeta="For LP | Maturity 17DEC2026")。PT保有と異なりIL(非永久的損失)
+      および満期後の扱いが別リスクとして加わる点に留意。監査状況の確認内容は
+      b6490fe9と同一。
+
+  - pool_id: 894ef05d-8143-4fa2-9a1c-bebc14686337
+    protocol: pendle-v2
+    chain: Arbitrum
+    symbol: SUSDAI
+
+    pool_address: "0xcbf629c8d396b1261f81f55175afa010e94787d8"
+    market_address: "0xcbf629c8d396b1261f81f55175afa010e94787d8"
+    vault_address: null
+
+    implementation_address: null
+    sy_address: "0x30ccf4bbee313fcd19f3e295b3ba2920a24e2f62"
+    pt_address: "0xb459db106f645d698e74027eef6019a26a0675cc"
+    yt_address: "0x11456849c38ea4af212ab8d4324b39983716516a"
+    expiry: "2026-10-15"
+
+    underlying_asset: "0x0b2b2b2076d95dda7817e785989fe353fe955ef9"  # sUSDai
+    underlying_protocol: null  # USDai/sUSDai発行体の監査状況未確認
+
+    audit_reports:
+      - auditor: null
+        report_url: "https://github.com/pendle-finance/pendle-core-v2-public/tree/main/audits"
+        report_date: null
+        scope_repository: "pendle-finance/pendle-core-v2-public"
+        scope_commit: null
+        findings:
+          critical: null
+          high: null
+          medium: null
+        unresolved_critical: null
+        unresolved_high: null
+
+    deployed_code_verified: null
+    audit_scope_matches_deployment: null
+
+    admin: null
+    upgrade_authority: null
+    multisig: null
+    emergency_roles: null
+
+    custody_risk: null
+    oracle_risk: null
+    counterparty_risk: null
+
+    phase_b_status: pending
+    reviewer_notes: >
+      同一underlying(sUSDai)で満期違いのMarketがもう1つ存在(expiry 2027-02-25、
+      今回の候補ではない)。DeFiLlamaのpoolMeta記載の満期日(15OCT2026)とPendle API
+      のexpiryが一致することを確認済み。sUSDai/USDai発行体固有の監査・カストディ
+      リスク(現実資産担保等)は未調査で、5件のPendleプールの中でも最優先で
+      underlying_protocolを確認すべき候補。
+
+  - pool_id: 3e78432a-f58b-46b2-ba69-1b446efc3e21
+    protocol: unitas-usdu
+    chain: BSC
+    symbol: SUSDU
+
+    pool_address: null
+    market_address: null
+    vault_address: null
+
+    implementation_address: null
+    sy_address: null
+    pt_address: null
+    yt_address: null
+    expiry: null
+
+    underlying_asset: "0xeA953eA6634d55dAC6697C436B1e81A679Db5882"  # USDu
+    underlying_protocol: null
+
+    audit_reports:
+      - auditor: ScaleBit
+        report_url: "http://github.com/UnipayFi/Audit"
+        report_date: null
+        scope_repository: null
+        scope_commit: null
+        findings:
+          critical: null
+          high: null
+          medium: null
+        unresolved_critical: null
+        unresolved_high: null
+      - auditor: SlowMist
+        report_url: "http://github.com/UnipayFi/Audit"
+        report_date: null
+        scope_repository: null
+        scope_commit: null
+        findings:
+          critical: null
+          high: null
+          medium: null
+        unresolved_critical: null
+        unresolved_high: null
+
+    deployed_code_verified: null
+    audit_scope_matches_deployment: null
+
+    admin: null
+    upgrade_authority: null
+    multisig: null
+    emergency_roles: null
+
+    custody_risk: null
+    oracle_risk: null
+    counterparty_risk: null
+
+    phase_b_status: pending
+    reviewer_notes: >
+      監査リンクが個人リポジトリ形式のGitHub URL(github.com/UnipayFi/Audit)で、
+      PeckShieldなど著名監査会社の自社ドメイン公開レポートと比べて改ざん・差し替え
+      への耐性が低い可能性がある(要注意点として明記)。USDu/sUSDuのproxy構成・
+      mint/redeem権限・DEFAULT_ADMIN_ROLE等の権限保持者は未確認。中央集権的な運用
+      リスク(取引所リスク・custodian・出金停止権限等)もスマートコントラクト監査と
+      別に確認が必要。auditor名(ScaleBit/SlowMist)は過去のチャットでの言及に基づく
+      仮記載であり、本ファイル作成時点でreport_urlの中身から直接確認できていない。
+
+phase_b_status_legend:
+  pending: "レビュー未完了、または一部項目が未確認"
+  approved: "全項目確認済み、Phase C(実資金投入)の対象候補にしてよい(ユーザー本人のみが設定する)"
+  rejected: "確認の結果、対象から外すと判断した"
