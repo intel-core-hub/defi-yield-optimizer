@@ -16,13 +16,13 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
 from risk import fetch_hack_events, fetch_protocol_static_risk, RECENT_HACK_WINDOW_DAYS
-from yields import fetch_pools, DATA_DIR
+from yields import fetch_pools, DATA_DIR, NO_BROTLI_HEADERS
 
 CHART_ENDPOINT = "https://yields.llama.fi/chart/{pool_id}"
 
 
 def fetch_pool_history(pool_id: str) -> pd.DataFrame:
-    resp = requests.get(CHART_ENDPOINT.format(pool_id=pool_id), timeout=30)
+    resp = requests.get(CHART_ENDPOINT.format(pool_id=pool_id), timeout=30, headers=NO_BROTLI_HEADERS)
     resp.raise_for_status()
     data = resp.json()["data"]
     df = pd.DataFrame(data)

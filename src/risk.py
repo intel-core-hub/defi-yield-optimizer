@@ -30,6 +30,8 @@ import time
 import pandas as pd
 import requests
 
+from yields import NO_BROTLI_HEADERS
+
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
@@ -53,7 +55,7 @@ def fetch_protocol_static_risk() -> pd.DataFrame:
     (借り手・保険引受先など実世界のカウンターパーティの信用リスクを内包する)を
     scoring.py側で機械的に除外できるようにするために持たせている。
     """
-    protocols = requests.get(PROTOCOLS_ENDPOINT, timeout=30).json()
+    protocols = requests.get(PROTOCOLS_ENDPOINT, timeout=30, headers=NO_BROTLI_HEADERS).json()
 
     now = time.time()
     rows = []
@@ -88,8 +90,8 @@ def fetch_hack_events() -> pd.DataFrame:
     無かったことを意味し、呼び出し側ではプロジェクトの全チェーンに適用すべき
     (保守的に倒す)。
     """
-    protocols = requests.get(PROTOCOLS_ENDPOINT, timeout=30).json()
-    hacks = requests.get(HACKS_ENDPOINT, timeout=30).json()
+    protocols = requests.get(PROTOCOLS_ENDPOINT, timeout=30, headers=NO_BROTLI_HEADERS).json()
+    hacks = requests.get(HACKS_ENDPOINT, timeout=30, headers=NO_BROTLI_HEADERS).json()
     id_to_slug = {p["id"]: p["slug"] for p in protocols}
 
     rows = []
