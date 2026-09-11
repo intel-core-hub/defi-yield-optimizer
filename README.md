@@ -141,8 +141,27 @@ Windowsタスクスケジューラに毎日08:00実行で登録済み(タスク�
 
 ```bash
 schtasks /query /tn "DefiYieldOptimizerSnapshot" /v /fo list   # 状態確認
+schtasks /run /tn "DefiYieldOptimizerSnapshot"                 # 手動で今すぐ実行
 schtasks /delete /tn "DefiYieldOptimizerSnapshot" /f           # 削除する場合
 ```
+
+**運用上の注意**: 登録直後の既定設定では、08:00時点でPCがログオフ/スリープ/バッテリー
+駆動だとその日は無言でスキップされ、後から追いつく仕組みが無かった(実際に2026-09-09・
+09-10の2日分が欠落し、`data/snapshots/`が2026-09-08の1件のまま止まっていたのを2026-09-11に
+発見)。以下の設定で解消済み:
+
+```powershell
+$task = Get-ScheduledTask -TaskName "DefiYieldOptimizerSnapshot"
+$settings = $task.Settings
+$settings.StartWhenAvailable = $true          # 見逃した分は次回ログオン時に追い実行
+$settings.DisallowStartIfOnBatteries = $false # バッテリー駆動中も実行可
+$settings.WakeToRun = $true                   # スリープ中のPCを起こしてでも実行
+Set-ScheduledTask -TaskName "DefiYieldOptimizerSnapshot" -Settings $settings
+```
+
+`data/snapshots/`にファイルが増えているか(=`load_snapshots()['snapshot_at'].dt.date.nunique()`
+または単純に`ls data/snapshots/`)は、フェーズEの再検証に十分な蓄積ができているかの確認も
+兼ねて、たまに見ておくこと。
 
 ## 注意
 
