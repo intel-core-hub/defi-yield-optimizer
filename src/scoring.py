@@ -3,6 +3,8 @@
 高APYでもボラティリティが高い/TVLが急減しているプールは危険信号として減点する。
 """
 
+import argparse
+import logging
 import sys
 import time
 from datetime import date
@@ -17,6 +19,8 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 
 from risk import fetch_hack_events, fetch_protocol_static_risk, RECENT_HACK_WINDOW_DAYS
 from yields import fetch_pools, DATA_DIR, NO_BROTLI_HEADERS
+
+logger = logging.getLogger(__name__)
 
 CHART_ENDPOINT = "https://yields.llama.fi/chart/{pool_id}"
 
@@ -229,7 +233,11 @@ def analyze_top_candidates(
     for _, pool in candidates.iterrows():
         try:
             history = fetch_pool_history(pool["pool"])
-        except requests.RequestException:
+        except requests.RequestException as exc:
+            logger.warning(
+                "プール履歴の取得に失敗したためスキップします: pool_id=%s project=%s error=%s",
+                pool["pool"], pool["project"], exc,
+            )
             continue
         metrics = stability_metrics(history)
         rows.append({
@@ -366,6 +374,15 @@ def allocate_portfolio(
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="DeFi利回りプールのスコアリングと配分案の表示")
+    parser.add_argument("capital_jpy", nargs="?", type=float, default=None, help="投入予定額(円)")
+    parser.add_argument(
+        "--phase-b", dest="phase_b", default=None,
+        help="Phase B manifest YAMLのパス(docs/phase-b/*.yaml)。指定時、approved以外の"
+             "プールを配分候補から除外する",
+    )
+    args = parser.parse_args()
+
     ranked = analyze_top_candidates()
     DATA_DIR.mkdir(exist_ok=True)
     ranked.to_csv(Path(DATA_DIR) / "ranked_pools.csv", index=False)
@@ -385,11 +402,20 @@ if __name__ == "__main__":
     print()
     print(ranked.dropna(subset=["score"]).head(15).to_string(index=False))
 
-    # 投入予定額(円)をコマンドライン引数で渡すと、チェーン別ガス代目安から
-    # ガス代/ポジション比率の警告列も出す。例: python src/scoring.py 50000
-    capital_jpy = float(sys.argv[1]) if len(sys.argv) > 1 else None
+    ranked_for_allocation = ranked
+    if args.phase_b:
+        from phase_b import load_manifest, apply_phase_b_gate
 
-    allocation = allocate_portfolio(ranked, capital_jpy=capital_jpy)
+        manifest = load_manifest(args.phase_b)
+        ranked_for_allocation = apply_phase_b_gate(ranked, manifest)
+        approved_count = (ranked_for_allocation["phase_b_status"] == "approved").sum()
+        print()
+        print(
+            f"Phase B manifest ({args.phase_b}) を適用: "
+            f"承認済み(approved) {approved_count}件のみを配分候補とします"
+        )
+
+    allocation = allocate_portfolio(ranked_for_allocation, capital_jpy=args.capital_jpy)
     unallocated = 1.0 - allocation["weight"].sum()
     print()
     print(
@@ -398,7 +424,7 @@ if __name__ == "__main__":
     )
     print(allocation.to_string(index=False))
     print(f"未配分(上限に収まる候補が足りなかった分。増額前提ではなく単に据え置き): {unallocated:.1%}")
-    if capital_jpy is None:
+    if args.capital_jpy is None:
         print(
             "ガス代/ポジション比率の目安も見る場合は "
             "`python src/scoring.py <投入予定額(円)>` のように実行してください。"

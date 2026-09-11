@@ -19,6 +19,12 @@
      候補から外す。
    - スコア上位でも、ツールの判定を鵜呑みにせず自分の目で二次確認する: プロトコル公式
      サイト、監査レポート原本、コントラクトアドレスがDeFiLlama記載のものと一致するか。
+     この確認結果は[`docs/phase-b/`](docs/phase-b/README.md)配下のYAMLに
+     `pool_id`単位で記録する(手順・スキーマは同ディレクトリのREADME参照)。
+     `phase_b_status`が`approved`のプール以外は
+     `python src/scoring.py <額> --phase-b docs/phase-b/YYYY-MM-DD.yaml`で
+     配分候補から自動的に除外される。**`approved`への格上げは必ずユーザー本人が行う**
+     (監査原本の読解・Critical/High対応状況の判断はClaude Codeが代行できない)。
    - まずテストネット、それが難しければ「全部失っても困らない」額のみで少額実行する。
    - 送金・入金・スワップは自分のウォレット(MetaMask等)で行う。秘密鍵・シードフレーズは
      コードにも`.env`にも書かない。
