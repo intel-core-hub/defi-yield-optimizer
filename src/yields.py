@@ -8,9 +8,15 @@ import requests
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 POOLS_ENDPOINT = "https://yields.llama.fi/pools"
 
+# 環境によっては(特にWindows + brotlicffiの組み合わせ)DeFiLlamaが返すbrotli圧縮
+# レスポンスのストリーミングデコードでrequests側が失敗することがある
+# (urllib3.exceptions.DecodeError: content-encoding: br)。gzip/deflateのみを
+# 許可することでbrotliネゴシエーション自体を避ける。
+NO_BROTLI_HEADERS = {"Accept-Encoding": "gzip, deflate"}
+
 
 def fetch_pools() -> pd.DataFrame:
-    resp = requests.get(POOLS_ENDPOINT, timeout=30)
+    resp = requests.get(POOLS_ENDPOINT, timeout=30, headers=NO_BROTLI_HEADERS)
     resp.raise_for_status()
     data = resp.json()["data"]
     return pd.DataFrame(data)
